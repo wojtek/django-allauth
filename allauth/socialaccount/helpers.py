@@ -8,6 +8,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth import login, logout as auth_logout
 from django.utils.translation import ugettext, ugettext_lazy as _
 from django.utils.http import urlencode
+from django.template.defaultfilters import slugify
 
 from allauth.utils import get_login_redirect_url, \
     generate_unique_username, email_address_exists
@@ -56,13 +57,13 @@ def _process_signup(request, data, account):
             (data.get('username', email or 'user'))
         u = User(username=username,
                  email=email or '',
-                 last_name = data.get('last_name', ''),
-                 first_name = data.get('first_name', ''))
+                 last_name = data.get('last_name', '')[0:User._meta.get_field('last_name').max_length],
+                 first_name = data.get('first_name', '')[0:User._meta.get_field('first_name').max_length])
         u.set_unusable_password()
         u.is_active = not account_settings.EMAIL_VERIFICATION
         u.save()
         account.user = u
-        account.save()
+        account.sync(data)
         send_email_confirmation(u, request=request)
         ret = complete_social_signup(request, u, account)
     return ret
@@ -105,7 +106,7 @@ def complete_social_login(request, data, account):
         else:
             # New social account
             account.user = request.user
-            account.save()
+            account.sync(data)
             messages.add_message \
             (request, messages.INFO, 
              _('The social account has been connected to your existing account'))
@@ -121,18 +122,45 @@ def complete_social_login(request, data, account):
     return ret
 
 
+def _name_from_url(url):
+    """
+    >>> _name_from_url('http://google.com/dir/file.ext')
+    u'file.ext'
+    >>> _name_from_url('http://google.com/dir/')
+    u'dir'
+    >>> _name_from_url('http://google.com/dir')
+    u'dir'
+    >>> _name_from_url('http://google.com/dir/..')
+    u'dir'
+    >>> _name_from_url('http://google.com/dir/../')
+    u'dir'
+    >>> _name_from_url('http://google.com')
+    u'google.com'
+    >>> _name_from_url('http://google.com/dir/subdir/file..ext')
+    u'file.ext'
+    """
+    from urlparse import urlparse
+
+    p = urlparse(url)
+    for base in (p.path.split('/')[-1],
+                 p.path,
+                 p.netloc):
+        name = ".".join(filter(lambda s: s,
+                               map(slugify, base.split("."))))
+        if name:
+            return name
+    
 def _copy_avatar(request, user, account):
     import urllib2
     from django.core.files.base import ContentFile
-    from urlparse import urlparse
     from avatar.models import Avatar
     url = account.get_avatar_url()    
     if url:
         ava = Avatar(user=user)
         ava.primary = Avatar.objects.filter(user=user).count() == 0
         try:
-            name = urlparse(url).path
             content = urllib2.urlopen(url).read()
+            name = _name_from_url(url)
             ava.avatar.save(name, ContentFile(content))
         except IOError, e:
             # Let's nog make a big deal out of this...
